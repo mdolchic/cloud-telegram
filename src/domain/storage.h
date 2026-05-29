@@ -4,6 +4,7 @@
 
 #pragma once
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -17,3 +18,5 @@ bool storage_list_album_names(const std::filesystem::path& albums_root, std::vec
 std::filesystem::path storage_bin_from_meta(const std::filesystem::path& meta);
 bool storage_move_pair(const std::filesystem::path& bin_src, const std::filesystem::path& meta_src,
                        const std::filesystem::path& dst_dir, std::string& err);
+
+std::mutex& storage_mutex();

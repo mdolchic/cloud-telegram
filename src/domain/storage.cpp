@@ -2,10 +2,14 @@
 // Created by Максим Долганов on 7.01.26.
 //
 
-#include "storage.h"
+#include "domain/storage.h"
 
 #include <algorithm>
 #include <system_error>
+
+namespace {
+    std::mutex g_storage_mutex{};
+}
 
 static std::filesystem::path root_dir() {
     return std::filesystem::path{"./data/users"};
@@ -162,4 +166,8 @@ bool storage_move_pair(const std::filesystem::path& bin_src, const std::filesyst
         return false;
     }
     return true;
+}
+
+std::mutex& storage_mutex() {
+    return g_storage_mutex;
 }

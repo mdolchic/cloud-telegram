@@ -2,7 +2,7 @@
 // Created by Максим Долганов on 7.01.26.
 //
 
-#include "meta.h"
+#include "domain/meta.h"
 
 #include <fstream>
 #include <string>

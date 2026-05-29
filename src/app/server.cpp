@@ -2,8 +2,9 @@
 // Created by Максим Долганов on 6.01.26.
 //
 
-#include "net_io.h"
-#include "protocol.h"
+#include "app/http_session.h"
+#include "infra/client_socket.h"
+#include "infra/thread_pool.h"
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -12,10 +13,15 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
-#include <string>
+#include <thread>
 
 namespace {
     constexpr int kPort{5555};
+
+    std::size_t worker_count() {
+        const auto count = std::thread::hardware_concurrency();
+        return count == 0 ? 4u : static_cast<std::size_t>(count);
+    }
 }
 
 int main() {
@@ -47,6 +53,8 @@ int main() {
 
     std::cerr << "Server listening on 127.0.0.1:" << kPort << "\n";
 
+    ThreadPool pool{worker_count()};
+
     while (true) {
         int cli{::accept(srv, nullptr, nullptr)};
         if (cli < 0) {
@@ -57,17 +65,20 @@ int main() {
             break;
         }
 
-        std::string line{};
-        while (net_io::read_line(cli, line)) {
-            if (!handle_command(cli, line)) {
-                break;
-            }
-            if (line == "EXIT") {
-                break;
-            }
+        try {
+            pool.submit([client_fd = cli]() {
+                try {
+                    http_handle_client(ClientSocket{client_fd});
+                } catch (const std::exception& e) {
+                    std::cerr << "client handler error: " << e.what() << "\n";
+                } catch (...) {
+                    std::cerr << "client handler error: unknown exception\n";
+                }
+            });
+        } catch (const std::exception& e) {
+            std::cerr << "failed to submit client task: " << e.what() << "\n";
+            ::close(cli);
         }
-
-        ::close(cli);
     }
 
     ::close(srv);

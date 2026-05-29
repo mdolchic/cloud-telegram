@@ -16,4 +16,5 @@ __MACOSX/
 *.dylib
 *.exe
 *.log
-data/test.jpg
+data/
+test.jpg

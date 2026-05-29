@@ -2,9 +2,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
+import http.client
 import io
+import json
 import os
-import socket
+import urllib.parse
 from typing import Dict, Tuple
 
 from telegram import (
@@ -39,90 +41,81 @@ MAIN_KB = ReplyKeyboardMarkup(
     is_persistent=True,
 )
 
-def recv_exact(sock: socket.socket, n: int) -> bytes:
-    data = bytearray()
-    while len(data) < n:
-        chunk = sock.recv(n - len(data))
-        if not chunk:
-            raise RuntimeError("connection closed")
-        data.extend(chunk)
-    return bytes(data)
+def http_request(method: str, path: str, body: bytes = b"", headers: dict | None = None):
+    conn = http.client.HTTPConnection(SERVER_HOST, SERVER_PORT, timeout=30)
+    try:
+        conn.request(method, path, body=body, headers=headers or {})
+        response = conn.getresponse()
+        payload = response.read()
+        return response.status, payload
+    finally:
+        conn.close()
 
-def recv_line(sock: socket.socket) -> str:
-    data = bytearray()
-    while True:
-        b = sock.recv(1)
-        if not b:
-            raise RuntimeError("connection closed")
-        if b == b"\n":
-            break
-        if b != b"\r":
-            data.extend(b)
-    return data.decode("utf-8", errors="replace")
+
+def parse_error(payload: bytes, status: int) -> str:
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return f"HTTP {status}"
+    return data.get("error", f"HTTP {status}")
 
 
 def send_addf(uid: str, kind: str, name: str, data: bytes) -> Tuple[bool, str]:
-    name_bytes = name.encode("utf-8", errors="replace")
-    header = f"ADDF {uid} {kind} {len(name_bytes)} {len(data)}\n".encode("utf-8")
-    with socket.create_connection((SERVER_HOST, SERVER_PORT)) as sock:
-        sock.sendall(header)
-        if name_bytes:
-            sock.sendall(name_bytes)
-        sock.sendall(data)
-        reply = recv_line(sock)
-        if reply.startswith("OK"):
-            return True, reply.strip()
-        return False, reply.strip()
+    path = "/users/{}/files?kind={}&name={}".format(
+        urllib.parse.quote(uid, safe=""),
+        urllib.parse.quote(kind, safe=""),
+        urllib.parse.quote(name, safe=""),
+    )
+    status, payload = http_request("POST", path, body=data, headers={"Content-Length": str(len(data))})
+    if status != 201:
+        return False, parse_error(payload, status)
+    reply = json.loads(payload.decode("utf-8"))
+    return True, reply["id"]
 
 def send_commit(uid: str, album: str) -> Tuple[bool, str]:
-    with socket.create_connection((SERVER_HOST, SERVER_PORT)) as sock:
-        sock.sendall(f"COMMIT {uid} {album}\n".encode("utf-8"))
-        reply = recv_line(sock)
-        if reply.startswith("OK"):
-            return True, reply.strip()
-        return False, reply.strip()
+    path = "/users/{}/albums/{}/commit".format(
+        urllib.parse.quote(uid, safe=""),
+        urllib.parse.quote(album, safe=""),
+    )
+    status, payload = http_request("POST", path, headers={"Content-Length": "0"})
+    if status != 200:
+        return False, parse_error(payload, status)
+    reply = json.loads(payload.decode("utf-8"))
+    return True, f"moved {reply['moved']}"
 
 
 def send_listalbums(uid: str) -> Tuple[bool, list]:
-    with socket.create_connection((SERVER_HOST, SERVER_PORT)) as sock:
-        sock.sendall(f"LISTALBUMS {uid}\n".encode("utf-8"))
-        first = recv_line(sock)
-        if not first.startswith("OK"):
-            return False, [first.strip()]
-        names = []
-        while True:
-            line = recv_line(sock).strip()
-            if line == "END":
-                break
-            if line:
-                names.append(line)
-        return True, names
+    path = "/users/{}/albums".format(urllib.parse.quote(uid, safe=""))
+    status, payload = http_request("GET", path)
+    if status != 200:
+        return False, [parse_error(payload, status)]
+    data = json.loads(payload.decode("utf-8"))
+    return True, data.get("albums", [])
 
 
 def send_getalbum(uid: str, album: str):
-    with socket.create_connection((SERVER_HOST, SERVER_PORT)) as sock:
-        sock.sendall(f"GETALBUM {uid} {album}\n".encode("utf-8"))
-        first = recv_line(sock)
-        if not first.startswith("OK"):
-            return False, first.strip(), []
-        items = []
-        while True:
-            header = recv_line(sock).strip()
-            if header == "END":
-                break
-            if header.startswith("ERROR"):
-                return False, header, []
-            parts = header.split()
-            if len(parts) != 4 or parts[0] != "ITEM":
-                return False, "ERROR bad server response", []
-            kind = parts[1]
-            name_len = int(parts[2])
-            nbytes = int(parts[3])
-            name_bytes = recv_exact(sock, name_len) if name_len else b""
-            blob = recv_exact(sock, nbytes) if nbytes else b""
-            name = name_bytes.decode("utf-8", errors="replace")
-            items.append((kind, name, blob))
-        return True, "", items
+    album_path = "/users/{}/albums/{}".format(
+        urllib.parse.quote(uid, safe=""),
+        urllib.parse.quote(album, safe=""),
+    )
+    status, payload = http_request("GET", album_path)
+    if status != 200:
+        return False, parse_error(payload, status), []
+
+    meta = json.loads(payload.decode("utf-8"))
+    items = []
+    for item in meta.get("items", []):
+        content_path = "/users/{}/albums/{}/items/{}/content".format(
+            urllib.parse.quote(uid, safe=""),
+            urllib.parse.quote(album, safe=""),
+            urllib.parse.quote(item["id"], safe=""),
+        )
+        content_status, blob = http_request("GET", content_path)
+        if content_status != 200:
+            return False, f"failed to download item {item['id']}", []
+        items.append((item["kind"], item["name"], blob))
+
+    return True, "", items
 
 
 async def schedule_group_done_hint(update: Update, uid: str, gid: str, delay_s: float = 1.0):
